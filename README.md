@@ -110,6 +110,61 @@ LANGCHAIN_API_KEY=ls__...
 LANGCHAIN_PROJECT=agentis
 ```
 
+## LangGraph Studio (visual debugger)
+
+Studio lets you step through the graph node-by-node, inspect state at every
+step, replay runs, and edit inputs — all without touching the FastAPI layer.
+
+### 1. Install the CLI (once, dev machine only)
+
+```bash
+pip install -r backend/dev-requirements.txt
+# installs langgraph-cli[inmem] — NOT added to the production image
+```
+
+### 2. Run the local Studio server
+
+```bash
+cd backend
+langgraph dev
+```
+
+The CLI starts a local API server on `http://127.0.0.1:2024` and prints:
+
+```
+Ready!
+- API: http://127.0.0.1:2024
+- Docs: http://127.0.0.1:2024/docs
+- LangGraph Studio: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+```
+
+Open the printed Studio URL in **Chrome or Firefox** (Safari blocks localhost
+connections — use `langgraph dev --tunnel` if you must use Safari).
+
+### 3. What you can do in Studio
+
+- **Visualise** the full graph topology (nodes, edges, conditional retry edge)
+- **Submit a run** directly from the UI and watch state update at each node
+- **Inspect state** after every node — see `execution_plan`, `subtask_results`,
+  `review_feedback`, `retry_count`, `final_output` as they are written
+- **Replay** a previous run from any checkpoint
+- **Edit state** mid-run to test what happens when the Reviewer rejects
+
+### Important tradeoffs — Studio vs the FastAPI app
+
+| Aspect | `langgraph dev` (Studio) | `docker-compose up` (production) |
+|--------|--------------------------|----------------------------------|
+| Postgres / DB logging | **No** — Studio uses its own in-memory runtime; `Task`, `SubtaskLog`, `ToolCallLog` tables are **not written** | Yes — full DB persistence |
+| FastAPI layer | **Bypassed** — Studio talks directly to the LangGraph API server, not to `POST /tasks` | In use |
+| State persistence | In-memory, pickled to `.langgraph_api/` — **lost on server restart** | Postgres (when checkpointer added in Phase 2) |
+| LangSmith tracing | Yes — same `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` env vars apply | Yes |
+| Hot reload | Yes — saves on restart per code change | No (volume mount auto-reloads uvicorn) |
+| Needs Postgres running | **No** | Yes |
+
+**Bottom line:** Studio is the right tool for iterating on agent prompts, graph
+topology, and control flow. Switch back to `docker-compose up` when you need to
+verify the full end-to-end path including DB writes and the REST API.
+
 ## Local Development (without Docker)
 
 ```bash

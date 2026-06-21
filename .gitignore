@@ -29,3 +29,8 @@ postgres_data/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# LangGraph Studio — local dev server scratch directory
+# Created automatically by `langgraph dev`; contains pickled in-memory state.
+# Lost on server restart anyway, never commit.
+.langgraph_api/

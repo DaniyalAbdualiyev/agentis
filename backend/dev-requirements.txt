@@ -1,0 +1,8 @@
+# Development-only dependencies — NOT installed in the production Docker image.
+# Install with: pip install -r dev-requirements.txt
+#
+# langgraph-cli[inmem] adds:
+#   - `langgraph dev`  command (local Studio server, no Docker needed)
+#   - in-memory runtime required by `langgraph dev`
+#   - hot-reload watcher
+langgraph-cli[inmem]>=0.4.27
