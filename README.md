@@ -20,11 +20,11 @@ task_intake ──► supervisor_planning ──► specialist_execution ──�
 
 | Agent | Model | Role |
 |-------|-------|------|
-| Supervisor | gpt-4o-mini | Decomposes task into ExecutionPlan |
-| Researcher | gpt-4o-mini | Web search via Tavily, raw findings |
-| Analyst | gpt-4o-mini | Structures findings, comparative analysis |
-| Writer | gpt-4o-mini | Polished final report |
-| Reviewer | gpt-4o-mini | Scores 1-5, approves or sends back with feedback |
+| Supervisor | gpt-5.4-mini | Decomposes task into ExecutionPlan |
+| Researcher | gpt-5.4-mini | Web search via Tavily, raw findings |
+| Analyst | gpt-5.4-mini | Structures findings, comparative analysis |
+| Writer | gpt-5.4-mini | Polished final report |
+| Reviewer | gpt-5.4-mini | Scores 1-5, approves or sends back with feedback |
 
 ### LLM Provider Swap
 

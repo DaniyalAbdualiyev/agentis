@@ -16,7 +16,7 @@ hardcode a model name.  That creates three problems:
 
 3. SCATTERED MODEL CONFIGURATION — model names and temperature settings
    would be duplicated across agent files.  Updating the Supervisor's model
-   from gpt-4o-mini to gpt-4o would require finding every occurrence.
+   from gpt-5.4-mini to gpt-5.4 would require finding every occurrence.
 
 HOW TO SWAP IN CLAUDE TOMORROW
 --------------------------------
@@ -81,14 +81,9 @@ log = structlog.get_logger(__name__)
 
 MODEL_REGISTRY: dict[str, dict[str, str]] = {
     "openai": {
-        # gpt-4o-mini: strong reasoning at low cost — good for structured
-        # output tasks (Supervisor, Reviewer) and text generation (specialists).
-        # Original spec called for gpt-4o-mini (supervisor/reviewer) and
-        # gpt-4o-nano (specialists); using mini for all until nano is available
-        # via the API.
-        "supervisor": "gpt-4o-mini",
-        "reviewer":   "gpt-4o-mini",
-        "specialist": "gpt-4o-mini",
+        "supervisor": "gpt-5.4-mini",
+        "reviewer":   "gpt-5.4-mini",
+        "specialist": "gpt-5.4-mini",
     },
     # Uncomment to enable Anthropic support:
     # "anthropic": {
