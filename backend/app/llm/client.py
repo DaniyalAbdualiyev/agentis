@@ -1,12 +1,57 @@
 """
-Unified LLM client — provider-agnostic wrapper.
+llm/client.py — Unified, provider-agnostic LLM wrapper.
 
-To swap in Claude later, add a new branch in _build_client() and map
-the role to the model name in MODEL_REGISTRY.  No agent code changes needed.
+THE CORE PROBLEM THIS FILE SOLVES
+-----------------------------------
+Without this wrapper, every agent would directly import `ChatOpenAI` and
+hardcode a model name.  That creates three problems:
+
+1. PROVIDER LOCK-IN — switching from OpenAI to Anthropic would require
+   editing every agent file.  With this wrapper, it is a one-line change
+   to MODEL_REGISTRY and a new `elif PROVIDER == "anthropic"` branch.
+
+2. INCONSISTENT RETRY LOGIC — without a shared wrapper, each agent would
+   need its own retry handling, or none would have it.  A transient 429 rate
+   limit from OpenAI would crash the whole graph run.
+
+3. SCATTERED MODEL CONFIGURATION — model names and temperature settings
+   would be duplicated across agent files.  Updating the Supervisor's model
+   from gpt-4o-mini to gpt-4o would require finding every occurrence.
+
+HOW TO SWAP IN CLAUDE TOMORROW
+--------------------------------
+1. Add an "anthropic" entry to MODEL_REGISTRY.
+2. Uncomment (or add) the `elif PROVIDER == "anthropic"` block in
+   `_build_client()` using `from langchain_anthropic import ChatAnthropic`.
+3. Set `LLM_PROVIDER=anthropic` in .env.
+4. No changes to supervisor.py, reviewer.py, or any specialist file.
+
+WHY WE USE LANGCHAIN'S CHAT MODELS (not the OpenAI SDK directly)
+------------------------------------------------------------------
+Two reasons:
+
+1. LANGSMITH AUTO-TRACING — LangChain's ChatOpenAI class automatically
+   emits traces to LangSmith when LANGCHAIN_TRACING_V2=true is set.
+   If we called `openai.chat.completions.create()` directly, we would get
+   no tracing without writing custom callback handlers.
+
+2. PROVIDER ABSTRACTION — LangChain's `ChatModel` interface is the same
+   for OpenAI, Anthropic, Google, etc.  `_build_client()` returns a
+   `ChatOpenAI` today, but could return `ChatAnthropic` tomorrow and the
+   rest of `call_llm` would not need to change a single line.
+
+WHY temperature=0.2
+-------------------
+- 0.0 is fully deterministic — useful for structured output but can produce
+  very repetitive text in the Writer's reports.
+- 1.0 is highly creative — introduces hallucinations and inconsistency,
+  especially in the Supervisor and Reviewer where we need reliable structure.
+- 0.2 is a pragmatic middle ground: low enough for consistent structured
+  outputs, high enough for varied, readable prose from the Writer.
+  All roles currently share this temperature; it can be made per-role later.
 """
 from __future__ import annotations
 
-import json
 import os
 from typing import Any, Type
 
@@ -18,15 +63,34 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 log = structlog.get_logger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# Model registry — one-line swap per role
+# MODEL_REGISTRY — the single place where provider + role → model is decided
+#
+# WHY A NESTED DICT (provider → role → model_name)
+# -------------------------------------------------
+# The outer key is the provider ("openai", "anthropic", …).
+# The inner key is the agent role ("supervisor", "reviewer", "specialist").
+# This two-level structure means:
+# - Adding a new provider requires adding one top-level key — no conditionals.
+# - Changing which model the Supervisor uses requires changing one string.
+# - The role names are the same vocabulary used in every agent file, so
+#   there is no translation layer between "what the agent says it is" and
+#   "what model it gets".
 # ---------------------------------------------------------------------------
+
 MODEL_REGISTRY: dict[str, dict[str, str]] = {
     "openai": {
+        # gpt-4o-mini: strong reasoning at low cost — good for structured
+        # output tasks (Supervisor, Reviewer) and text generation (specialists).
+        # Original spec called for gpt-4o-mini (supervisor/reviewer) and
+        # gpt-4o-nano (specialists); using mini for all until nano is available
+        # via the API.
         "supervisor": "gpt-4o-mini",
         "reviewer":   "gpt-4o-mini",
-        "specialist": "gpt-4o-mini",   # use same tier; swap to nano when available
+        "specialist": "gpt-4o-mini",
     },
+    # Uncomment to enable Anthropic support:
     # "anthropic": {
     #     "supervisor": "claude-3-5-sonnet-20241022",
     #     "reviewer":   "claude-3-5-sonnet-20241022",
@@ -34,12 +98,35 @@ MODEL_REGISTRY: dict[str, dict[str, str]] = {
     # },
 }
 
+# Read from environment at module load time.
+# Defaulting to "openai" means the system works out of the box without
+# setting LLM_PROVIDER explicitly.
 PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
 
 
 def _build_client(role: str) -> ChatOpenAI:
-    """Return a configured LangChain chat model for *role*."""
+    """
+    Instantiate and return a LangChain chat model for the given role.
+
+    WHY THIS IS A SEPARATE FUNCTION (not inlined in call_llm)
+    ----------------------------------------------------------
+    Separating client construction from invocation makes it easy to:
+    - Mock the client in tests: patch `_build_client` to return a mock.
+    - Add per-role configuration (streaming, timeout, max_tokens) without
+      making call_llm more complex.
+    - Swap the provider by changing this one function's branching logic.
+
+    WHY WE CREATE A NEW CLIENT PER CALL (not a singleton)
+    ------------------------------------------------------
+    LangChain's ChatOpenAI is cheap to construct.  Creating one per call
+    avoids shared mutable state between concurrent requests — in an async
+    FastAPI server, a singleton client with internal state could cause
+    subtle race conditions.  If construction cost becomes a concern, a
+    per-role LRU cache could be added here without changing call_llm.
+    """
+    # Fall back to the openai registry if an unknown provider is somehow set.
     models = MODEL_REGISTRY.get(PROVIDER, MODEL_REGISTRY["openai"])
+    # Fall back to the "specialist" model if an unknown role is passed.
     model_name = models.get(role, models["specialist"])
 
     if PROVIDER == "openai":
@@ -48,9 +135,34 @@ def _build_client(role: str) -> ChatOpenAI:
             temperature=0.2,
             api_key=os.getenv("OPENAI_API_KEY"),
         )
-    # Future: elif PROVIDER == "anthropic": ...
-    raise ValueError(f"Unknown LLM provider: {PROVIDER}")
 
+    # Future provider branches go here.  Example:
+    # elif PROVIDER == "anthropic":
+    #     from langchain_anthropic import ChatAnthropic
+    #     return ChatAnthropic(model=model_name, temperature=0.2)
+
+    raise ValueError(f"Unknown LLM provider: {PROVIDER!r}. Add a branch in _build_client().")
+
+
+# ---------------------------------------------------------------------------
+# call_llm — the only function agents should call
+#
+# WHY @retry IS ON THIS FUNCTION (not inside each agent)
+# -------------------------------------------------------
+# OpenAI rate limits (429) and transient network errors are common in
+# production.  Putting retry logic here means every agent benefits
+# automatically — no agent file needs to import tenacity.
+#
+# RETRY PARAMETERS EXPLAINED
+# ---------------------------
+# stop_after_attempt(3): try up to 3 times total (1 original + 2 retries).
+#   More retries increase cost; fewer leave too little margin for transient errors.
+# wait_exponential(multiplier=1, min=2, max=10):
+#   Wait 2s after first failure, ~4s after second, capped at 10s.
+#   Exponential backoff reduces thundering-herd pressure on the API.
+# reraise=True: if all attempts fail, propagate the original exception up to
+#   the calling agent, which then catches it and returns an error state update.
+# ---------------------------------------------------------------------------
 
 @retry(
     stop=stop_after_attempt(3),
@@ -63,20 +175,55 @@ async def call_llm(
     response_model: Type[BaseModel] | None = None,
 ) -> Any:
     """
-    Invoke the LLM for *role*.
+    Invoke the LLM for a given agent role.
+
+    This is the only LLM entry point in the codebase.  All agents call this
+    function; none import or construct chat models directly.
 
     Parameters
     ----------
-    role:           "supervisor" | "reviewer" | "specialist"
-    messages:       list of {"role": "system"|"user"|"assistant", "content": str}
-    response_model: optional Pydantic v2 model — triggers structured output
+    role : str
+        Agent role key — "supervisor", "reviewer", or "specialist".
+        Used to look up the correct model in MODEL_REGISTRY.
+
+    messages : list[dict[str, str]]
+        Conversation history in the standard format:
+        [{"role": "system", "content": "..."}, {"role": "user", "content": "..."}]
+        We use a plain list of dicts (not LangChain message objects) because:
+        - It is a simpler, provider-agnostic data format.
+        - Agents don't need to import from langchain_core just to build messages.
+        - This function handles the translation to LangChain objects internally.
+
+    response_model : Type[BaseModel] | None
+        If provided, uses LangChain's `.with_structured_output()` to force
+        the model to return a valid instance of this Pydantic class.
+        Used by the Supervisor (→ ExecutionPlan) and Reviewer (→ ReviewResult).
+        If None, returns the model's raw text response as a plain string.
 
     Returns
     -------
-    Pydantic model instance if *response_model* supplied, else raw string.
+    BaseModel instance if response_model is provided, else str.
+
+    HOW STRUCTURED OUTPUT WORKS UNDER THE HOOD
+    -------------------------------------------
+    `client.with_structured_output(response_model)` tells LangChain to:
+    1. Generate a JSON schema from the Pydantic class.
+    2. Pass that schema to OpenAI as a `tools` definition (function calling).
+    3. Instruct OpenAI to always respond with a tool call matching the schema.
+    4. Parse the JSON response into the Pydantic model, raising ValidationError
+       if the model's output doesn't conform.
+
+    This is more reliable than prompt-engineering alone ("return valid JSON")
+    because the constraint is enforced at the API level, not just as a hint.
     """
     client = _build_client(role)
 
+    # Translate plain dicts into LangChain message objects.
+    # WHY SystemMessage vs HumanMessage: LangChain (and the OpenAI API) treats
+    # system messages differently from human/user messages — system messages
+    # set the model's persona and rules, while human messages carry the actual
+    # request.  Using the correct types ensures the API receives the right
+    # `role` field in the underlying JSON payload.
     lc_messages: list[BaseMessage] = []
     for m in messages:
         if m["role"] == "system":
@@ -87,11 +234,15 @@ async def call_llm(
     log.debug("llm_call", role=role, provider=PROVIDER, structured=response_model is not None)
 
     if response_model is not None:
+        # Structured output path — returns a Pydantic model instance.
+        # LangSmith will trace this call automatically because we're using
+        # LangChain's ChatOpenAI, which has built-in tracing callbacks.
         structured_client = client.with_structured_output(response_model)
         result = await structured_client.ainvoke(lc_messages)
         log.debug("llm_structured_response", role=role, model=response_model.__name__)
         return result
 
+    # Free-text path — returns the model's response content as a plain string.
     result = await client.ainvoke(lc_messages)
     text = result.content
     log.debug("llm_text_response", role=role, chars=len(text))
