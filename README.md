@@ -113,7 +113,7 @@ LANGCHAIN_PROJECT=agentis
 ## Local Development (without Docker)
 
 ```bash
-# Start Postgres and Redis separately, then:
+# Start Postgres separately, then:
 cd backend
 pip install -r requirements.txt
 PYTHONPATH=. uvicorn app.main:app --reload

@@ -357,3 +357,22 @@ returned in `GET /tasks/{task_id}` as `langsmith_trace_url`.
    → `specialist_execution` (with nested LLM calls and tool invocations) →
    `reviewer_validation` → (optional) `writer_retry` → `specialist_execution`
    → `reviewer_validation`.
+
+---
+
+## 6. Future Phases — infrastructure intentionally deferred
+
+### Redis (not present in Phase 1)
+
+Redis was removed from Phase 1 because `AgentState` already holds all
+intermediate data in memory for the duration of a single `ainvoke()` call —
+there is nothing to cache or coordinate externally within one graph run.
+
+Redis will return in Phase 2 for one of two purposes, whichever is picked:
+
+- **LangGraph checkpointer** — persisting `AgentState` to Redis between nodes
+  so a paused graph (e.g. waiting for human approval) can resume from exactly
+  where it stopped, even across process restarts.
+- **Live status pub/sub** — publishing node-completion events from the graph
+  so `GET /tasks/{id}` can return real-time progress ("researcher finished,
+  analyst running") instead of only `pending` / `completed`.
