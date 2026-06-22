@@ -15,6 +15,23 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  chromadb:
+    image: chromadb/chroma:latest
+    ports:
+      - "8100:8000"
+    volumes:
+      - chromadb_data:/chroma/chroma
+
   backend:
     build:
       context: ./backend
@@ -28,9 +45,14 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_started
     volumes:
       - ./backend:/app
     restart: on-failure
 
 volumes:
   postgres_data:
+  chromadb_data:
