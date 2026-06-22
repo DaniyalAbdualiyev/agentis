@@ -58,6 +58,22 @@ async def run_task_background(task_id: str, original_task: str) -> None:
     """
     Execute the full agent graph and persist results to PostgreSQL.
     LangSmith tracing is automatic via LANGCHAIN_TRACING_V2=true env var.
+
+    PHASE 2A ADDITIONS
+    ------------------
+    This function now integrates two memory layers around the graph invocation:
+
+    1. WorkingMemoryManager (Redis) — initialised before the graph runs and
+       cleared after.  It provides a fast per-task scratchpad for any agent
+       that wants to stash intermediate state outside AgentState.
+
+    2. SemanticMemoryManager (ChromaDB) — called once after a successful task
+       completion to store the task summary as a vector document.  Future tasks
+       can retrieve similar past tasks to improve planning quality.
+
+    Both memory layers degrade gracefully: if Redis or ChromaDB is unavailable,
+    the function logs a warning and continues.  A memory failure must NEVER
+    crash a task or affect its result in PostgreSQL.
     """
     from app.graph.graph import compiled_graph
     from app.db.engine import get_db_session as _get_session
@@ -99,12 +115,39 @@ async def run_task_background(task_id: str, original_task: str) -> None:
     if tracer is not None:
         run_config["callbacks"] = [tracer]
 
+    # ------------------------------------------------------------------
+    # Phase 2A: initialise working memory (Redis scratchpad)
+    # ------------------------------------------------------------------
+    working_mem = None
+    try:
+        from app.memory.working_memory import WorkingMemoryManager
+        working_mem = WorkingMemoryManager()
+        await working_mem.connect()
+        log.info("working_memory_connected", task_id=task_id)
+    except Exception as wm_exc:
+        log.warning("working_memory_init_failed", task_id=task_id, error=str(wm_exc))
+        working_mem = None  # degrade gracefully — continue without working memory
+
     try:
         final_state = await compiled_graph.ainvoke(initial_state, config=run_config)
         log.info("task_runner_done", task_id=task_id)
     except Exception as exc:
         log.error("task_runner_crashed", task_id=task_id, error=str(exc))
         final_state = {**initial_state, "errors": [str(exc)]}
+
+    # ------------------------------------------------------------------
+    # Phase 2A: clean up working memory
+    # ------------------------------------------------------------------
+    if working_mem is not None:
+        try:
+            await working_mem.clear(task_id)
+            await working_mem.close()
+        except Exception as cleanup_exc:
+            log.warning(
+                "working_memory_cleanup_failed",
+                task_id=task_id,
+                error=str(cleanup_exc),
+            )
 
     # Capture LangSmith trace URL
     trace_url: str | None = None
@@ -164,6 +207,35 @@ async def run_task_background(task_id: str, original_task: str) -> None:
                 )
 
         log.info("task_persisted", task_id=task_id, status=status)
+
+    # ------------------------------------------------------------------
+    # Phase 2A: store task completion in long-term semantic memory
+    # We do this AFTER the DB write so that a memory failure cannot
+    # interfere with the task's recorded status in PostgreSQL.
+    # ------------------------------------------------------------------
+    if status == "completed":
+        try:
+            from app.memory.semantic_memory import SemanticMemoryManager
+            memory_mgr = SemanticMemoryManager()
+            await memory_mgr.store_task_completion(
+                task_id=task_id,
+                user_id="default",  # multi-user support in a future phase
+                task_summary={
+                    "original_task": original_task,
+                    "plan_reasoning": plan.reasoning if plan else "",
+                    "final_output_preview": (final_output or "")[:500],
+                },
+                execution_data={
+                    "subtask_count": len(plan.subtasks) if plan else 0,
+                    "retry_count": final_state.get("retry_count", 0),
+                    "error_count": len(errors),
+                    "agents_used": [s.assigned_agent for s in plan.subtasks] if plan else [],
+                },
+            )
+            log.info("semantic_memory_stored", task_id=task_id)
+        except Exception as mem_exc:
+            # Memory failures must NOT crash task execution or affect task status.
+            log.warning("memory_store_failed", task_id=task_id, error=str(mem_exc))
 
 
 # ---------------------------------------------------------------------------
