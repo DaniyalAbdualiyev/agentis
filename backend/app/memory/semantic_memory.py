@@ -56,9 +56,11 @@ The HTTP client is slightly slower per call but architecturally correct.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 
 import chromadb
@@ -221,6 +223,40 @@ class SemanticMemoryManager:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    async def _run_sync(fn, *args, **kwargs):
+        """
+        Run a synchronous (blocking) callable in the default thread-pool
+        executor so that the asyncio event loop remains free.
+
+        WHY run_in_executor HERE
+        -------------------------
+        All ChromaDB operations (collection.add, collection.query,
+        collection.count, get_or_create_collection) are synchronous HTTP
+        calls that block the calling thread for 50–500 ms each.  When
+        called directly from an async method they block the entire asyncio
+        event loop, which:
+        1. Prevents FastAPI from handling any other requests during the call.
+        2. Adds latency on top of latency: 5+ sequential blocking calls in
+           retrieve_context() stacked up to 5-6 seconds before the Supervisor
+           could start planning.
+
+        run_in_executor(None, fn) delegates the call to Python's default
+        ThreadPoolExecutor (thread count = min(32, cpu_count+4)) and
+        returns an awaitable, so the event loop can do other work while
+        the thread blocks on the HTTP response.
+
+        WHY NOT asyncio.run() or nest_asyncio
+        ---------------------------------------
+        asyncio.run() cannot be called from a running event loop.
+        nest_asyncio patches asyncio internals and is not safe in production.
+        run_in_executor is the standard, safe, documented approach.
+        """
+        loop = asyncio.get_event_loop()
+        if kwargs:
+            fn = partial(fn, **kwargs)
+        return await loop.run_in_executor(None, fn, *args)
+
     def _get_collection(self, name: str) -> chromadb.Collection:
         """
         Get or create a ChromaDB collection with our embedding function.
@@ -335,8 +371,11 @@ class SemanticMemoryManager:
         }
 
         try:
-            collection = self._get_collection(_COLLECTION_TASK_MEMORIES)
-            collection.add(
+            collection = await self._run_sync(
+                self._get_collection, _COLLECTION_TASK_MEMORIES
+            )
+            await self._run_sync(
+                collection.add,
                 ids=[memory_id],
                 documents=[content],
                 metadatas=[task_metadata],
@@ -369,8 +408,11 @@ class SemanticMemoryManager:
                 "confidence_score": max(0.1, 1.0 - (retry_count * 0.2)),
                 "access_count": 0,
             }
-            approach_collection = self._get_collection(_COLLECTION_APPROACH_MEMORIES)
-            approach_collection.add(
+            approach_collection = await self._run_sync(
+                self._get_collection, _COLLECTION_APPROACH_MEMORIES
+            )
+            await self._run_sync(
+                approach_collection.add,
                 ids=[approach_id],
                 documents=[approach_content],
                 metadatas=[approach_metadata],
@@ -428,13 +470,16 @@ class SemanticMemoryManager:
 
         for collection_name in _ALL_COLLECTIONS:
             try:
-                collection = self._get_collection(collection_name)
+                collection = await self._run_sync(
+                    self._get_collection, collection_name
+                )
                 # Check if collection is non-empty before querying
-                count = collection.count()
+                count = await self._run_sync(collection.count)
                 if count == 0:
                     continue
 
-                results = collection.query(
+                results = await self._run_sync(
+                    collection.query,
                     query_texts=[query_text],
                     n_results=min(n_results, count),
                     where=where,
@@ -501,13 +546,16 @@ class SemanticMemoryManager:
         past tasks provide enough context without overwhelming the prompt.
         """
         try:
-            collection = self._get_collection(_COLLECTION_TASK_MEMORIES)
-            count = collection.count()
+            collection = await self._run_sync(
+                self._get_collection, _COLLECTION_TASK_MEMORIES
+            )
+            count = await self._run_sync(collection.count)
             if count == 0:
                 return []
 
             where: dict[str, Any] = {"user_id": user_id}
-            results = collection.query(
+            results = await self._run_sync(
+                collection.query,
                 query_texts=[task_description],
                 n_results=min(n_results, count),
                 where=where,
@@ -532,13 +580,16 @@ class SemanticMemoryManager:
         metadata["outcome"] = "failed".
         """
         try:
-            collection = self._get_collection(_COLLECTION_APPROACH_MEMORIES)
-            count = collection.count()
+            collection = await self._run_sync(
+                self._get_collection, _COLLECTION_APPROACH_MEMORIES
+            )
+            count = await self._run_sync(collection.count)
             if count == 0:
                 return []
 
             where: dict[str, Any] = {"user_id": user_id}
-            results = collection.query(
+            results = await self._run_sync(
+                collection.query,
                 query_texts=[problem_type],
                 n_results=min(5, count),
                 where=where,
@@ -562,12 +613,15 @@ class SemanticMemoryManager:
         rather than doing a similarity search.
         """
         try:
-            collection = self._get_collection(_COLLECTION_USER_PREFERENCES)
-            count = collection.count()
+            collection = await self._run_sync(
+                self._get_collection, _COLLECTION_USER_PREFERENCES
+            )
+            count = await self._run_sync(collection.count)
             if count == 0:
                 return []
 
-            results = collection.get(
+            results = await self._run_sync(
+                collection.get,
                 where={"user_id": user_id},
                 include=["documents", "metadatas"],
             )
@@ -601,8 +655,11 @@ class SemanticMemoryManager:
         """
         for collection_name in _ALL_COLLECTIONS:
             try:
-                collection = self._get_collection(collection_name)
-                results = collection.get(
+                collection = await self._run_sync(
+                    self._get_collection, collection_name
+                )
+                results = await self._run_sync(
+                    collection.get,
                     ids=[memory_id],
                     include=["documents", "metadatas"],
                 )
@@ -639,15 +696,18 @@ class SemanticMemoryManager:
 
         for collection_name in _ALL_COLLECTIONS:
             try:
-                collection = self._get_collection(collection_name)
+                collection = await self._run_sync(
+                    self._get_collection, collection_name
+                )
                 # Find all matching IDs first (ChromaDB delete requires IDs).
-                results = collection.get(
+                results = await self._run_sync(
+                    collection.get,
                     where=where,
                     include=[],
                 )
                 if results and results.get("ids"):
                     ids_to_delete = results["ids"]
-                    collection.delete(ids=ids_to_delete)
+                    await self._run_sync(collection.delete, ids=ids_to_delete)
                     total_deleted += len(ids_to_delete)
                     log.debug(
                         "semantic_memory_deleted",
