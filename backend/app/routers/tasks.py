@@ -90,6 +90,7 @@ async def run_task_background(task_id: str, original_task: str) -> None:
         "retry_count":           0,
         "final_output":          None,
         "errors":                [],
+        "memory_context":        None,  # populated by memory_retrieval_node (Phase 2B)
     }
 
     # LangSmith config: tag each run with the task_id for easy trace lookup

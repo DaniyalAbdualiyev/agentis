@@ -134,6 +134,40 @@ async def run_supervisor(state: AgentState) -> dict:
         },
     ]
 
+    # ------------------------------------------------------------------
+    # Phase 2B: inject memory context if memory_retrieval_node found
+    # relevant past experience for this task.
+    #
+    # WHY WE APPEND TO THE USER MESSAGE (not the system prompt)
+    # ----------------------------------------------------------
+    # The system prompt defines the Supervisor's role and rules — it should
+    # be stable and not contain dynamic data.  Appending memory context to
+    # the user message keeps system instructions clean and makes the
+    # provenance of the extra context clear: "here is the task, and here
+    # is what you know from past experience about it."
+    #
+    # WHY WE WRAP IN try/except
+    # --------------------------
+    # memory_context_data is a dict produced by MemoryContext.model_dump().
+    # If the dict is malformed or MemoryContext validation fails, we must
+    # not crash the planning step — the task is more important than the
+    # memory enrichment.  A warning is logged so the issue is visible.
+    # ------------------------------------------------------------------
+    memory_context_data = state.get("memory_context")
+    if memory_context_data:
+        try:
+            from app.memory.retrieval import PlanningMemoryRetriever
+            from app.memory.models import MemoryContext
+            context = MemoryContext(**memory_context_data)
+            retriever = PlanningMemoryRetriever()
+            memory_text = retriever.format_for_prompt(context)
+            if memory_text:
+                messages[1]["content"] += f"\n\n{memory_text}"
+                log.info("memory_injected_into_planning", chars=len(memory_text))
+        except Exception as exc:
+            log.warning("memory_injection_failed", error=str(exc))
+            # Continue without memory — do not fail the planning step.
+
     try:
         # response_model=ExecutionPlan tells call_llm to use OpenAI structured
         # output and parse the response directly into an ExecutionPlan instance.

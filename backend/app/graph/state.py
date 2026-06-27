@@ -293,3 +293,9 @@ class AgentState(TypedDict):
 
     # Accumulated (not overwritten) across all nodes via operator.add reducer
     errors: Annotated[list[str], operator.add]
+
+    # Written by memory_retrieval_node, read by supervisor_planning.
+    # Stored as a plain dict (MemoryContext.model_dump()) so it survives
+    # LangGraph's JSON serialisation without importing memory models here.
+    # None means either no relevant memories were found, or retrieval failed.
+    memory_context: Optional[dict]  # MemoryContext.model_dump()

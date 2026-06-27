@@ -116,6 +116,10 @@ def create_app() -> FastAPI:
     from app.routers.tasks import router as tasks_router
     app.include_router(tasks_router)
 
+    # Phase 2B: memory management + dashboard API
+    from app.routers.memory import router as memory_router
+    app.include_router(memory_router)
+
     @app.get("/health")
     async def health() -> dict:
         return {"status": "ok"}

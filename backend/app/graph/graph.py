@@ -27,8 +27,11 @@ FLOW DIAGRAM
   task_intake
        │
        ▼
-  supervisor_planning          ← Supervisor decomposes task → ExecutionPlan
+  memory_retrieval              ← Phase 2B: queries ChromaDB for similar past tasks
        │
+       ▼
+  supervisor_planning          ← Supervisor decomposes task → ExecutionPlan
+       │                          (now enriched with memory context when available)
        ▼
   specialist_execution         ← researcher → analyst → writer (sequential)
        │
@@ -104,6 +107,53 @@ MAX_RETRIES = 2
 # If you want to understand what the Supervisor does, read supervisor.py —
 # you do not need to understand the graph wiring to do so.
 # ---------------------------------------------------------------------------
+
+async def memory_retrieval_node(state: AgentState) -> dict:
+    """
+    Queries long-term memory for context relevant to the current task.
+    Runs before the Supervisor so planning is informed by past experience.
+
+    WHY THIS IS A SEPARATE NODE (not inside supervisor_planning)
+    ------------------------------------------------------------
+    Keeping memory retrieval in its own node means:
+    - It has its own named span in LangSmith traces, so you can see exactly
+      how long memory retrieval took and whether it found anything.
+    - It can fail independently without affecting the Supervisor — if ChromaDB
+      is down, the Supervisor still runs with memory_context=None.
+    - It can be easily disabled/bypassed for testing by changing graph edges
+      without touching supervisor.py at all.
+    - Future phases can add more pre-planning nodes (e.g. a task classifier)
+      without touching the Supervisor's code.
+
+    GRACEFUL DEGRADATION
+    --------------------
+    All exceptions are caught here.  If retrieval fails for any reason (network
+    timeout, ChromaDB unavailable, embedding API error), the node returns
+    {"memory_context": None} and logs a warning.  The Supervisor proceeds
+    without memory context — exactly as it did before Phase 2B was added.
+    """
+    task = state.get("original_task", "")
+    if not task:
+        return {"memory_context": None}
+
+    try:
+        from app.memory.retrieval import PlanningMemoryRetriever
+        retriever = PlanningMemoryRetriever()
+        context = await retriever.retrieve_context(task)
+        if context.has_relevant_memories:
+            log.info(
+                "memory_context_found",
+                similar_tasks=len(context.similar_tasks),
+                effective_approaches=len(context.effective_approaches),
+            )
+            return {"memory_context": context.model_dump()}
+        else:
+            log.info("no_relevant_memories")
+            return {"memory_context": None}
+    except Exception as exc:
+        log.warning("memory_retrieval_failed", error=str(exc))
+        return {"memory_context": None}  # degrade gracefully
+
 
 async def task_intake_node(state: AgentState) -> dict:
     """
@@ -387,6 +437,7 @@ def build_graph() -> StateGraph:
     # Register nodes — order here does not affect execution order,
     # which is determined entirely by edges below.
     graph.add_node("task_intake",           task_intake_node)
+    graph.add_node("memory_retrieval",      memory_retrieval_node)   # Phase 2B
     graph.add_node("supervisor_planning",   supervisor_planning_node)
     graph.add_node("specialist_execution",  specialist_execution_node)
     graph.add_node("reviewer_validation",   reviewer_validation_node)
@@ -396,7 +447,10 @@ def build_graph() -> StateGraph:
     graph.set_entry_point("task_intake")
 
     # Linear forward edges — the happy path.
-    graph.add_edge("task_intake",          "supervisor_planning")
+    # Phase 2B inserts memory_retrieval between task_intake and supervisor_planning
+    # so the Supervisor can plan with awareness of past similar tasks.
+    graph.add_edge("task_intake",          "memory_retrieval")
+    graph.add_edge("memory_retrieval",     "supervisor_planning")
     graph.add_edge("supervisor_planning",  "specialist_execution")
     graph.add_edge("specialist_execution", "reviewer_validation")
 
