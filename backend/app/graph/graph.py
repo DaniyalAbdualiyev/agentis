@@ -480,3 +480,9 @@ def build_graph() -> StateGraph:
 # builds internal lookup tables).  Doing it once at import time means request
 # handlers pay no compilation cost.
 compiled_graph = build_graph().compile()
+
+# `graph` is an alias required by LangGraph Studio / langgraph-cli.
+# The CLI discovers graphs by looking for a module-level variable named `graph`
+# at the path specified in langgraph.json.  Both names point to the same
+# compiled object so existing imports of `compiled_graph` are unaffected.
+graph = compiled_graph
