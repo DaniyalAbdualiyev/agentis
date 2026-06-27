@@ -79,6 +79,8 @@ report, not so many that a low-quality pipeline never terminates.
 from __future__ import annotations
 
 import structlog
+import uuid
+
 from langgraph.graph import END, StateGraph
 
 from app.agents.reviewer import run_reviewer
@@ -157,7 +159,8 @@ async def memory_retrieval_node(state: AgentState) -> dict:
 
 async def task_intake_node(state: AgentState) -> dict:
     """
-    Entry point node — validates that a non-empty task was submitted.
+    Entry point node — validates that a non-empty task was submitted and
+    initialises any pipeline-start fields that were not provided by the caller.
 
     WHY THIS NODE EXISTS AS A SEPARATE STEP
     ----------------------------------------
@@ -170,14 +173,40 @@ async def task_intake_node(state: AgentState) -> dict:
       LLM budget.
     - It returns `{}` (no state changes) on success, which is the LangGraph
       idiom for "I ran, everything is fine, pass the state through unchanged."
+
+    WHY task_id IS AUTO-GENERATED HERE
+    -----------------------------------
+    AgentState.task_id is NotRequired so LangGraph Studio's input form only
+    shows the user the one field they care about (original_task).  If no
+    task_id was supplied (the Studio path), this node generates a fresh UUID.
+    The FastAPI path (routers/tasks.py) always supplies a task_id, so the
+    branch below is never reached in production — it is purely a Studio
+    convenience.  Similarly, subtask_results / retry_count / errors are
+    seeded with their zero-values here so downstream nodes never see KeyError.
     """
     task = state.get("original_task", "").strip()
     if not task:
         # Writing to `errors` appends (not overwrites) because of the
         # operator.add reducer declared in AgentState.
         return {"errors": ["No task provided"]}
-    log.info("task_intake", task_id=state.get("task_id"), task=task[:80])
-    return {}
+
+    # Seed fields that the FastAPI caller normally provides but Studio omits.
+    updates: dict = {}
+    if not state.get("task_id"):
+        updates["task_id"] = str(uuid.uuid4())
+    if "subtask_results" not in state:
+        updates["subtask_results"] = {}
+    if "retry_count" not in state:
+        updates["retry_count"] = 0
+    if "current_subtask_index" not in state:
+        updates["current_subtask_index"] = 0
+    # errors uses operator.add (list concat) — returning [] is safe: it appends
+    # nothing, but it also guarantees the field exists for downstream readers.
+    if "errors" not in state:
+        updates["errors"] = []
+
+    log.info("task_intake", task_id=updates.get("task_id") or state.get("task_id"), task=task[:80])
+    return updates
 
 
 async def supervisor_planning_node(state: AgentState) -> dict:
