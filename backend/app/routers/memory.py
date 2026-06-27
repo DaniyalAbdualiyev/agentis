@@ -137,7 +137,7 @@ async def get_stats(user_id: str) -> MemoryStats:
 @router.get("/search", response_model=list[MemoryDocument])
 async def search_memories(
     q: str = Query(..., description="Semantic search query text"),
-    user_id: str = Query(default="default", description="User ID to filter by"),
+    user_id: str = Query(default="default_user", description="User ID to filter by"),
     n: int = Query(default=10, ge=1, le=50, description="Maximum number of results"),
 ) -> list[MemoryDocument]:
     """

@@ -220,7 +220,7 @@ async def run_task_background(task_id: str, original_task: str) -> None:
             memory_mgr = SemanticMemoryManager()
             await memory_mgr.store_task_completion(
                 task_id=task_id,
-                user_id="default",  # multi-user support in a future phase
+                user_id="default_user",  # multi-user support in a future phase
                 task_summary={
                     "original_task": original_task,
                     "plan_reasoning": plan.reasoning if plan else "",

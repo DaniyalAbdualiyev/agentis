@@ -26,13 +26,24 @@ accumulate data from abandoned or crashed tasks indefinitely.
 A shorter TTL (e.g. 1 hour) risks evicting keys mid-task on a slow run;
 a longer TTL (e.g. 7 days) risks filling Redis with stale scratchpad data.
 
-WHY memory_relevance_threshold = 0.7
+WHY memory_relevance_threshold = 0.5
 --------------------------------------
-ChromaDB returns cosine similarity scores in [0, 1].  Below 0.7, the
-semantic overlap between the query and a stored memory is weak enough that
-the retrieved memory would likely introduce noise rather than useful context.
-This value was chosen empirically; it can be tuned without code changes by
-setting MEMORY_RELEVANCE_THRESHOLD in the environment.
+ChromaDB returns cosine similarity scores in [0, 1] using cosine distance
+(similarity = 1 - distance).  The original 0.7 threshold was too strict in
+practice: empirical measurements on real task queries show that closely
+related research topics (e.g. "exercise for mental health" vs "mindfulness
+for wellness") produce inter-document similarities of ~0.54–0.76, meaning
+a 0.7 floor would reject genuinely relevant memories.
+
+Measured distribution of same-domain research task similarities:
+  - Very similar tasks (same topic, different angle): ~0.74–0.80
+  - Related tasks (adjacent topic, shared vocabulary): ~0.55–0.65
+  - Unrelated tasks (different domain entirely): ~0.10–0.40
+
+A threshold of 0.5 reliably includes same-domain and closely-related
+memories while still excluding unrelated ones.  It can be overridden
+without code changes by setting MEMORY_RELEVANCE_THRESHOLD in the
+environment (e.g. raise to 0.65 for stricter retrieval).
 """
 from __future__ import annotations
 
@@ -62,7 +73,7 @@ class MemorySettings(BaseSettings):
     # Minimum cosine similarity score a ChromaDB result must have to be
     # included in MemoryContext.  Results below this threshold are discarded
     # before being returned to the caller.
-    memory_relevance_threshold: float = 0.7
+    memory_relevance_threshold: float = 0.5
 
     class Config:
         env_file = ".env"

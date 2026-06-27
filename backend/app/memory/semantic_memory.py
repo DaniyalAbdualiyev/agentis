@@ -64,7 +64,7 @@ from typing import Any
 import chromadb
 import structlog
 from chromadb.api.types import EmbeddingFunction, Documents, Embeddings
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from app.memory.config import memory_settings
 from app.memory.exceptions import MemoryRetrievalError, MemoryStoreError
@@ -96,28 +96,44 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
     """
     ChromaDB embedding function that delegates to OpenAI's Embeddings API.
 
-    WHY NOT USE chromadb.utils.embedding_functions.OpenAIEmbeddingFunction
-    -----------------------------------------------------------------------
-    ChromaDB ships its own OpenAI wrapper, but it uses the synchronous
-    openai client internally.  Since our FastAPI app is fully async, we
-    use AsyncOpenAI to avoid blocking the event loop during embedding calls.
+    WHY TWO CLIENTS (_async_client AND _sync_client)
+    -------------------------------------------------
+    ChromaDB's EmbeddingFunction.__call__ interface is synchronous — it is
+    invoked by ChromaDB's own synchronous code paths (collection.add(),
+    collection.query(), etc.).  FastAPI runs on an asyncio event loop, so
+    calling asyncio.run() from within __call__ raises:
+        RuntimeError: asyncio.run() cannot be called from a running event loop
+    because asyncio.run() creates a *new* event loop, which is forbidden
+    when one is already running.
 
-    WHY THIS WRAPS AsyncOpenAI (not plain openai)
-    -----------------------------------------------
-    Embedding calls can take 100–500 ms.  In an async FastAPI request, a
-    blocking synchronous call would stall the event loop and degrade
-    latency for all concurrent requests.  AsyncOpenAI.embeddings.create()
-    is awaitable and plays nicely with asyncio.
+    The fix is to keep two separate clients:
+    - _sync_client  (openai.OpenAI)       — used inside __call__ (the sync path).
+      It blocks the thread, but __call__ is already synchronous and ChromaDB
+      already blocks the thread on the HTTP request to its own server, so one
+      more blocking HTTP call for embeddings is consistent with that contract.
+    - _async_client (openai.AsyncOpenAI)  — used inside embed_texts() (the
+      async path we call directly from our own async methods).  It is awaitable
+      and does not block the event loop.
 
-    NOTE: ChromaDB's EmbeddingFunction interface is synchronous (__call__).
-    We work around this by running the coroutine via asyncio.run() only when
-    called from ChromaDB's internal synchronous paths.  For all other uses
-    (our own code), we call embed_texts() directly as an async method.
+    WHY NOT USE chromadb.AsyncHttpClient
+    -------------------------------------
+    chromadb.AsyncHttpClient was added in chromadb ≥ 0.5.x.  At the time of
+    writing the container runs 1.5.x which ships it, but switching to the async
+    client is a larger refactor (all collection operations become awaitable and
+    the whole SemanticMemoryManager would need restructuring).  The two-client
+    approach is simpler and equally correct.
     """
 
     def __init__(self, model: str = "text-embedding-3-small") -> None:
         self._model = model
-        self._client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        api_key = os.getenv("OPENAI_API_KEY")
+        # Async client: used when we call embed_texts() directly from async code.
+        self._async_client = AsyncOpenAI(api_key=api_key)
+        # Sync client: used inside __call__ which is invoked by ChromaDB's
+        # synchronous collection.add() / collection.query() while FastAPI's
+        # event loop is already running.  asyncio.run() would raise here, so
+        # we use the plain synchronous openai.OpenAI client instead.
+        self._sync_client = OpenAI(api_key=api_key)
 
     async def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """
@@ -128,7 +144,7 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
         OpenAI's embedding endpoint accepts up to 2048 inputs per request.
         Batching reduces API round trips and therefore latency and cost.
         """
-        response = await self._client.embeddings.create(
+        response = await self._async_client.embeddings.create(
             model=self._model,
             input=texts,
         )
@@ -136,24 +152,26 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
 
     def __call__(self, input: Documents) -> Embeddings:  # type: ignore[override]
         """
-        Synchronous ChromaDB interface.  Used by ChromaDB internally when
-        it needs to embed documents or query vectors.
+        Synchronous ChromaDB interface.  Invoked by ChromaDB's collection.add()
+        and collection.query() when they need to embed documents or query vectors.
 
-        WHY asyncio.run() HERE
-        -----------------------
-        ChromaDB's collection.add() and collection.query() are synchronous
-        and call the embedding function synchronously.  We bridge to our
-        async embed_texts() using asyncio.run().  This is safe as long as
-        ChromaDB's calls are not nested inside a running event loop — which
-        is guaranteed because we only call ChromaDB from within our own
-        async methods that properly await results.
+        WHY SYNC openai.OpenAI HERE (not asyncio.run)
+        ----------------------------------------------
+        This method is called from within FastAPI's running asyncio event loop
+        (because our async task runner awaits compiled_graph.ainvoke() which
+        eventually calls collection.add() synchronously).  asyncio.run() cannot
+        create a new loop inside a running one — it raises RuntimeError.
 
-        If this ever becomes a problem (e.g. nested event loops), the fix
-        is to use chromadb's async client (chromadb.AsyncHttpClient) which
-        was added in chromadb>=0.5.
+        Using the synchronous openai.OpenAI client here is correct because:
+        1. __call__ is itself synchronous (ChromaDB requires this).
+        2. The thread is already blocked on ChromaDB's own HTTP calls.
+        3. Blocking one more time for the embedding call is consistent.
         """
-        import asyncio
-        return asyncio.run(self.embed_texts(list(input)))
+        response = self._sync_client.embeddings.create(
+            model=self._model,
+            input=list(input),
+        )
+        return [item.embedding for item in response.data]
 
 
 # ------------------------------------------------------------------

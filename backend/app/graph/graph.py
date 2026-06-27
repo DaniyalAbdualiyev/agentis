@@ -139,7 +139,7 @@ async def memory_retrieval_node(state: AgentState) -> dict:
     try:
         from app.memory.retrieval import PlanningMemoryRetriever
         retriever = PlanningMemoryRetriever()
-        context = await retriever.retrieve_context(task)
+        context = await retriever.retrieve_context(task, user_id="default_user")
         if context.has_relevant_memories:
             log.info(
                 "memory_context_found",
