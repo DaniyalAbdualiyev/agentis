@@ -85,6 +85,15 @@ Rules:
 - depends_on for subtask_2 = ["subtask_1"], for subtask_3 = ["subtask_2"]
 - Descriptions must be specific and actionable
 - The reasoning field should briefly explain your decomposition strategy
+
+Memory Instructions:
+- If "## Past Context (from memory)" is present in the user message, you MUST
+  read it carefully before planning.
+- Reference specific past tasks or approaches in your reasoning field, e.g.
+  "Similar to the past task on X, we will reuse the three-stage pipeline."
+- Adapt subtask descriptions based on what worked well in similar past tasks.
+- If an effective approach is listed, apply it. If a failed approach is listed,
+  explicitly avoid it and explain why in your reasoning.
 """
 
 
@@ -163,7 +172,11 @@ async def run_supervisor(state: AgentState) -> dict:
             memory_text = retriever.format_for_prompt(context)
             if memory_text:
                 messages[1]["content"] += f"\n\n{memory_text}"
-                log.info("memory_injected_into_planning", chars=len(memory_text))
+                log.info(
+                    "memory_injected_into_planning",
+                    chars=len(memory_text),
+                    preview=memory_text[:200],
+                )
         except Exception as exc:
             log.warning("memory_injection_failed", error=str(exc))
             # Continue without memory — do not fail the planning step.

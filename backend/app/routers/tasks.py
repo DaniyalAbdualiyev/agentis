@@ -224,7 +224,7 @@ async def run_task_background(task_id: str, original_task: str) -> None:
                 task_summary={
                     "original_task": original_task,
                     "plan_reasoning": plan.reasoning if plan else "",
-                    "final_output_preview": (final_output or "")[:500],
+                    "final_output_preview": (final_output or "")[:1500],
                 },
                 execution_data={
                     "subtask_count": len(plan.subtasks) if plan else 0,

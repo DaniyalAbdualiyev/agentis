@@ -346,10 +346,13 @@ class SemanticMemoryManager:
         # Combine the key signals into a single embeddable text.
         # The embedding quality is highest when the text is coherent prose
         # rather than a JSON dump — the model was trained on natural language.
+        # Output preview leads because it contains the richest domain vocabulary
+        # (the actual findings) — this improves cross-task similarity matching
+        # for semantically related topics even when task titles differ.
         content = (
             f"Task: {original_task}\n"
             f"Plan reasoning: {plan_reasoning}\n"
-            f"Output preview: {output_preview}"
+            f"Key findings and output:\n{output_preview}"
         )
 
         memory_id = self._make_document_id()
