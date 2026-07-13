@@ -61,22 +61,24 @@ async def run_task_background(task_id: str, original_task: str) -> None:
 
     PHASE 2A ADDITIONS
     ------------------
-    This function now integrates two memory layers around the graph invocation:
+    Integrates two memory layers:
+    1. WorkingMemoryManager (Redis) — per-task scratchpad, cleared after run.
+    2. SemanticMemoryManager (ChromaDB) — stores completed-task summaries.
 
-    1. WorkingMemoryManager (Redis) — initialised before the graph runs and
-       cleared after.  It provides a fast per-task scratchpad for any agent
-       that wants to stash intermediate state outside AgentState.
+    PHASE 3 ADDITIONS
+    -----------------
+    Uses the checkpointer-compiled graph (from app.checkpointer.get_graph())
+    so state is persisted between nodes.  The run config includes
+    thread_id=task_id so LangGraph can identify this thread for pause/resume.
 
-    2. SemanticMemoryManager (ChromaDB) — called once after a successful task
-       completion to store the task summary as a vector document.  Future tasks
-       can retrieve similar past tasks to improve planning quality.
-
-    Both memory layers degrade gracefully: if Redis or ChromaDB is unavailable,
-    the function logs a warning and continues.  A memory failure must NEVER
-    crash a task or affect its result in PostgreSQL.
+    When the graph hits the human_review interrupt, GraphInterrupt is raised.
+    We catch it, log it, and return early.  The task status is already set to
+    "awaiting_human_review" by check_escalation_node (inside the graph) so
+    no further DB updates are needed here in the interrupted case.
     """
-    from app.graph.graph import compiled_graph
+    from app.checkpointer import get_graph
     from app.db.engine import get_db_session as _get_session
+    from langgraph.errors import GraphInterrupt
 
     log.info("task_runner_start", task_id=task_id)
 
@@ -91,6 +93,13 @@ async def run_task_background(task_id: str, original_task: str) -> None:
         "final_output":          None,
         "errors":                [],
         "memory_context":        None,  # populated by memory_retrieval_node (Phase 2B)
+        # Phase 3 HITL fields — seeded with defaults so nodes never see KeyError.
+        "review_score":          None,
+        "requires_human_review": False,
+        "escalation_reason":     "",
+        "human_decision":        None,
+        "human_feedback":        None,
+        "human_reviewed_at":     None,
     }
 
     # LangSmith config: tag each run with the task_id for easy trace lookup
@@ -106,6 +115,11 @@ async def run_task_background(task_id: str, original_task: str) -> None:
             tracer = None
 
     run_config: dict = {
+        # Phase 3: thread_id = task_id so LangGraph checkpoints under this key.
+        # When the graph is paused and then resumed via POST /reviews/{id}/decision,
+        # LangGraph loads the checkpoint using the same thread_id to find where
+        # execution left off.
+        "configurable": {"thread_id": task_id},
         "run_name": f"agentis-task-{task_id}",
         "metadata": {
             "task_id": task_id,
@@ -129,15 +143,41 @@ async def run_task_background(task_id: str, original_task: str) -> None:
         log.warning("working_memory_init_failed", task_id=task_id, error=str(wm_exc))
         working_mem = None  # degrade gracefully — continue without working memory
 
+    # ------------------------------------------------------------------
+    # Run the graph.  Three possible outcomes:
+    #
+    # 1. Normal completion: final_state returned, persist to DB as before.
+    # 2. GraphInterrupt: graph paused at human_review interrupt.  Task
+    #    status is already "awaiting_human_review" (set inside the graph).
+    #    Clean up working memory and return — no further DB update needed.
+    # 3. Unexpected exception: log and persist as "failed".
+    # ------------------------------------------------------------------
+    graph = get_graph()
+    interrupted = False
+    final_state: dict = {}
+
     try:
-        final_state = await compiled_graph.ainvoke(initial_state, config=run_config)
+        final_state = await graph.ainvoke(initial_state, config=run_config)
         log.info("task_runner_done", task_id=task_id)
+
+        # LangGraph 1.x: interrupt() causes ainvoke() to RETURN (no exception),
+        # with the state as it was when the interrupt was hit.  Detect this by
+        # checking requires_human_review in the returned state.
+        # (In older LangGraph versions, GraphInterrupt was raised instead.)
+        if final_state.get("requires_human_review"):
+            interrupted = True
+            log.info("task_awaiting_human_review", task_id=task_id)
+
+    except GraphInterrupt:
+        # Older LangGraph behaviour: interrupt() raises GraphInterrupt.
+        interrupted = True
+        log.info("task_awaiting_human_review", task_id=task_id)
     except Exception as exc:
         log.error("task_runner_crashed", task_id=task_id, error=str(exc))
         final_state = {**initial_state, "errors": [str(exc)]}
 
     # ------------------------------------------------------------------
-    # Phase 2A: clean up working memory
+    # Phase 2A: clean up working memory regardless of outcome.
     # ------------------------------------------------------------------
     if working_mem is not None:
         try:
@@ -149,6 +189,11 @@ async def run_task_background(task_id: str, original_task: str) -> None:
                 task_id=task_id,
                 error=str(cleanup_exc),
             )
+
+    # If the graph paused for human review, nothing else to persist here.
+    # check_escalation_node already set the task status to "awaiting_human_review".
+    if interrupted:
+        return
 
     # Capture LangSmith trace URL
     trace_url: str | None = None
@@ -168,7 +213,7 @@ async def run_task_background(task_id: str, original_task: str) -> None:
             f"?peek={run_name}"
         )
 
-    # Persist result
+    # Persist result — only reached if graph completed normally (no interrupt).
     async with _get_session() as session:
         plan = final_state.get("execution_plan")
         plan_dict = plan.model_dump() if plan is not None else None
@@ -177,6 +222,8 @@ async def run_task_background(task_id: str, original_task: str) -> None:
         final_output = final_state.get("final_output")
         errors = final_state.get("errors", [])
 
+        # For human-approved/edited tasks the status may already be set by
+        # human_review_node.  For normal (non-HITL) completions, determine it here.
         status = "completed" if final_output else "failed"
 
         trace_id = trace_url or run_name
@@ -206,6 +253,15 @@ async def run_task_background(task_id: str, original_task: str) -> None:
                     output=output,
                     completed_at=datetime.now(timezone.utc) if output else None,
                 )
+
+        # Phase 4: roll node-level ExecutionTrace rows into the Task's
+        # aggregate cost/latency/token columns.  Done in the same session/commit
+        # as the status update so a completed task always has totals populated.
+        try:
+            from app.db.queries import finalize_task_totals
+            await finalize_task_totals(session, task_id)
+        except Exception as agg_exc:
+            log.warning("finalize_task_totals_failed", task_id=task_id, error=str(agg_exc))
 
         log.info("task_persisted", task_id=task_id, status=status)
 
@@ -261,6 +317,41 @@ async def submit_task(
         status="pending",
         message="Task submitted. Poll GET /tasks/{task_id} for status.",
     )
+
+
+class TaskListItem(BaseModel):
+    task_id: str
+    original_task: str
+    status: str
+    total_cost_usd: float
+    total_latency_ms: int
+    created_at: str
+
+
+@router.get("", response_model=list[TaskListItem])
+async def list_all_tasks() -> list[TaskListItem]:
+    """
+    Return all tasks newest-first for the frontend Task List page.
+
+    Declared BEFORE GET /{task_id} so the empty-path route is unambiguous
+    (FastAPI matches routes in declaration order within a router).
+    """
+    from app.db.queries import list_tasks
+
+    async with get_db_session() as session:
+        tasks = await list_tasks(session)
+
+    return [
+        TaskListItem(
+            task_id=t.id,
+            original_task=t.original_task,
+            status=t.status,
+            total_cost_usd=t.total_cost_usd or 0.0,
+            total_latency_ms=t.total_latency_ms or 0,
+            created_at=t.created_at.isoformat(),
+        )
+        for t in tasks
+    ]
 
 
 @router.get("/{task_id}", response_model=TaskStatusResponse)

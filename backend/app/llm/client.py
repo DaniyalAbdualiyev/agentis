@@ -99,6 +99,18 @@ MODEL_REGISTRY: dict[str, dict[str, str]] = {
 PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
 
 
+def _model_for_role(role: str) -> str:
+    """
+    Resolve the concrete model name for a role.
+
+    Extracted from _build_client so the tracing layer can label each LLM call
+    with the exact model that ran (needed for correct per-model cost pricing)
+    without re-implementing the provider/role fallback logic.
+    """
+    models = MODEL_REGISTRY.get(PROVIDER, MODEL_REGISTRY["openai"])
+    return models.get(role, models["specialist"])
+
+
 def _build_client(role: str) -> ChatOpenAI:
     """
     Instantiate and return a LangChain chat model for the given role.
@@ -119,10 +131,8 @@ def _build_client(role: str) -> ChatOpenAI:
     subtle race conditions.  If construction cost becomes a concern, a
     per-role LRU cache could be added here without changing call_llm.
     """
-    # Fall back to the openai registry if an unknown provider is somehow set.
-    models = MODEL_REGISTRY.get(PROVIDER, MODEL_REGISTRY["openai"])
     # Fall back to the "specialist" model if an unknown role is passed.
-    model_name = models.get(role, models["specialist"])
+    model_name = _model_for_role(role)
 
     if PROVIDER == "openai":
         return ChatOpenAI(
@@ -212,6 +222,7 @@ async def call_llm(
     because the constraint is enforced at the API level, not just as a hint.
     """
     client = _build_client(role)
+    model_name = _model_for_role(role)
 
     # Translate plain dicts into LangChain message objects.
     # WHY SystemMessage vs HumanMessage: LangChain (and the OpenAI API) treats
@@ -228,17 +239,88 @@ async def call_llm(
 
     log.debug("llm_call", role=role, provider=PROVIDER, structured=response_model is not None)
 
+    # Phase 4: capture the outgoing prompt so the trace can show exactly what
+    # was sent to the model.  We serialise the plain-dict messages (not the
+    # LangChain objects) because they are already the human-readable form.
+    prompt_text = _serialise_prompt(messages)
+
     if response_model is not None:
         # Structured output path — returns a Pydantic model instance.
         # LangSmith will trace this call automatically because we're using
         # LangChain's ChatOpenAI, which has built-in tracing callbacks.
-        structured_client = client.with_structured_output(response_model)
+        #
+        # WHY include_raw=True (Phase 4)
+        # -------------------------------
+        # `.with_structured_output(model)` normally returns ONLY the parsed
+        # Pydantic instance, discarding the underlying AIMessage — and with it
+        # the token-usage metadata we need for cost accounting.  Passing
+        # include_raw=True makes it return {"raw": AIMessage, "parsed": model,
+        # "parsing_error": ...} so we can read usage from `raw` and still hand
+        # the caller the `parsed` model exactly as before.
+        structured_client = client.with_structured_output(
+            response_model, include_raw=True
+        )
         result = await structured_client.ainvoke(lc_messages)
+        raw_msg = result.get("raw") if isinstance(result, dict) else None
+        parsed = result.get("parsed") if isinstance(result, dict) else result
+        response_text = parsed.model_dump_json() if parsed is not None else ""
+        _record_usage(model_name, raw_msg, prompt_text, response_text)
         log.debug("llm_structured_response", role=role, model=response_model.__name__)
-        return result
+        return parsed
 
     # Free-text path — returns the model's response content as a plain string.
     result = await client.ainvoke(lc_messages)
     text = result.content
+    _record_usage(model_name, result, prompt_text, text if isinstance(text, str) else str(text))
     log.debug("llm_text_response", role=role, chars=len(text))
     return text
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: usage-capture helpers
+# ---------------------------------------------------------------------------
+
+def _serialise_prompt(messages: list[dict[str, str]]) -> str:
+    """Render the message list as a readable transcript for the trace record."""
+    return "\n\n".join(f"[{m.get('role', '?')}]\n{m.get('content', '')}" for m in messages)
+
+
+def _record_usage(model_name: str, message: Any, prompt_text: str, response_text: str) -> None:
+    """
+    Extract token usage from a LangChain AIMessage and forward it to the
+    per-node tracing accumulator.
+
+    WHY TWO USAGE SOURCES
+    ---------------------
+    Newer LangChain messages expose `.usage_metadata` (a normalised dict with
+    input_tokens/output_tokens).  Older/edge responses only populate
+    `.response_metadata["token_usage"]` (the raw OpenAI field names).  We try
+    the normalised form first and fall back to the raw form so token counts are
+    captured regardless of the exact response shape.
+    """
+    input_tokens = 0
+    output_tokens = 0
+    try:
+        usage = getattr(message, "usage_metadata", None)
+        if usage:
+            input_tokens = int(usage.get("input_tokens", 0) or 0)
+            output_tokens = int(usage.get("output_tokens", 0) or 0)
+        else:
+            meta = getattr(message, "response_metadata", {}) or {}
+            token_usage = meta.get("token_usage", {}) or {}
+            input_tokens = int(token_usage.get("prompt_tokens", 0) or 0)
+            output_tokens = int(token_usage.get("completion_tokens", 0) or 0)
+    except Exception as exc:  # never let usage extraction break the LLM call
+        log.debug("usage_extraction_failed", error=str(exc))
+
+    try:
+        from app.observability.tracing import record_llm_call
+        record_llm_call(
+            model=model_name,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            prompt=prompt_text,
+            response=response_text,
+        )
+    except Exception as exc:
+        log.debug("record_llm_call_failed", error=str(exc))

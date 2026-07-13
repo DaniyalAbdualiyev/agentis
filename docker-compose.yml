@@ -36,6 +36,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: agentis-backend:latest
     ports:
       - "8000:8000"
     env_file:
@@ -52,6 +53,49 @@ services:
     volumes:
       - ./backend:/app
     restart: on-failure
+    healthcheck:
+      # Uses the interpreter already in the image (no curl in python:slim).
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Browser-reachable backend URL, inlined into the bundle at build time.
+        VITE_API_URL: http://localhost:8000
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  # Phase 5: one-shot integration-test runner.
+  #   docker compose run --rm test
+  # Lives behind the "test" profile so it never starts on a normal `up`.
+  # Reuses the backend image (same build context) and installs the dev-only
+  # test dependencies at runtime, then runs the integration suite against the
+  # live backend service.  The process exits with pytest's exit code.
+  test:
+    profiles: ["test"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: agentis-backend:latest
+    environment:
+      # Reach the backend over the compose network, not localhost.
+      AGENTIS_API_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: >
+      sh -c "pip install -q -r dev-requirements.txt &&
+             pytest tests/test_e2e.py -v -m integration"
 
 volumes:
   postgres_data:

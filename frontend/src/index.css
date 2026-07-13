@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-100 text-slate-800 antialiased;
+}
+
+/* Minimal markdown styling for rendered task output (react-markdown). */
+.markdown-body h1 {
+  @apply mb-3 mt-5 text-xl font-bold text-slate-900 first:mt-0;
+}
+.markdown-body h2 {
+  @apply mb-2 mt-4 text-lg font-bold text-slate-900 first:mt-0;
+}
+.markdown-body h3 {
+  @apply mb-2 mt-3 text-base font-semibold text-slate-900 first:mt-0;
+}
+.markdown-body p {
+  @apply mb-3 text-sm leading-relaxed text-slate-700;
+}
+.markdown-body ul {
+  @apply mb-3 list-disc space-y-1 pl-5 text-sm text-slate-700;
+}
+.markdown-body ol {
+  @apply mb-3 list-decimal space-y-1 pl-5 text-sm text-slate-700;
+}
+.markdown-body a {
+  @apply text-indigo-600 underline hover:text-indigo-700;
+}
+.markdown-body code {
+  @apply rounded bg-slate-100 px-1 py-0.5 text-xs;
+}
+.markdown-body pre {
+  @apply mb-3 overflow-auto rounded bg-slate-900 p-3 text-xs text-slate-100;
+}
+.markdown-body pre code {
+  @apply bg-transparent p-0;
+}
+.markdown-body blockquote {
+  @apply mb-3 border-l-4 border-slate-200 pl-3 text-sm italic text-slate-500;
+}
+.markdown-body strong {
+  @apply font-semibold text-slate-900;
+}

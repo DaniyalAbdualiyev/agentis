@@ -60,6 +60,18 @@ import operator
 from pydantic import BaseModel, Field
 from typing_extensions import NotRequired, TypedDict
 
+# ---------------------------------------------------------------------------
+# HITL escalation keywords — checked in check_escalation_node (Phase 3).
+# Stored here (not in graph.py) so they are importable from anywhere.
+# ---------------------------------------------------------------------------
+SENSITIVE_KEYWORDS: frozenset[str] = frozenset({
+    "legal", "medical", "financial", "investment", "diagnosis", "prescription",
+    "lawsuit", "confidential", "classified", "urgent", "critical", "dangerous",
+    # Additional medical terms so dosage/medication tasks are caught:
+    "medication", "dosage", "drug", "treatment", "symptoms", "surgery",
+    "depression", "anxiety", "disease", "illness", "therapy",
+})
+
 
 # ---------------------------------------------------------------------------
 # SubtaskStatus — lifecycle constants
@@ -316,3 +328,25 @@ class AgentState(TypedDict):
     # LangGraph's JSON serialisation without importing memory models here.
     # None means either no relevant memories were found, or retrieval failed.
     memory_context: NotRequired[Optional[dict]]  # MemoryContext.model_dump()
+
+    # ── Phase 3: Human-in-the-Loop ──────────────────────────────────────────
+    # review_score
+    #   Written by reviewer_validation after every review pass.  Used by
+    #   check_escalation to detect trigger 2 (low quality after retries).
+    review_score: NotRequired[Optional[int]]
+
+    # requires_human_review / escalation_reason
+    #   Set by check_escalation_node when any trigger fires.
+    #   requires_human_review is also a trigger 3 outlet: any agent can set
+    #   it to True in its own return dict to force human review.
+    requires_human_review: NotRequired[bool]
+    escalation_reason: NotRequired[str]
+
+    # human_decision / human_feedback / human_reviewed_at
+    #   Written by human_review_node after the human submits via the API.
+    #   decision: "approved" | "edited" | "rejected"
+    #   feedback: replacement text for "edited", else empty / None
+    #   reviewed_at: ISO-8601 UTC string (plain str for JSON-serialisation safety)
+    human_decision: NotRequired[Optional[str]]
+    human_feedback: NotRequired[Optional[str]]
+    human_reviewed_at: NotRequired[Optional[str]]

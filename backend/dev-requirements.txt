@@ -8,6 +8,11 @@
 langgraph-cli[inmem]>=0.4.27
 
 # Testing
+# pytest: test runner used across the whole suite (unit + integration).
+pytest>=8.0.0
 # fakeredis: in-memory Redis implementation that mirrors the redis-py API.
 # Used in tests/memory/test_working_memory.py to avoid needing a live Redis.
 fakeredis>=2.21.0
+# aiosqlite: async SQLite driver used by tests/test_stats.py to run the stats
+# queries against a real (in-memory) database — no PostgreSQL/Docker required.
+aiosqlite>=0.20.0

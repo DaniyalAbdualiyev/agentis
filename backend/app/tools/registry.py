@@ -64,6 +64,14 @@ class ToolRegistry:
         if spec is None:
             raise ValueError(f"Tool '{name}' not found in registry")
 
+        # Phase 4: count this invocation toward the current node's tool_calls_count.
+        # No-op outside a traced node, so tests / direct calls are unaffected.
+        try:
+            from app.observability.tracing import increment_tool_calls
+            increment_tool_calls()
+        except Exception:
+            pass
+
         start = time.monotonic()
         error_msg: str | None = None
         result: Any = None

@@ -102,16 +102,20 @@ class TestRouteAfterReview(unittest.TestCase):
         }
 
     def test_routes_to_end_when_approved(self):
+        # Phase 3+: an accepted report no longer routes straight to END.  It
+        # routes to check_escalation, which then decides END vs human_review.
         state = self._make_state(final_output="Great report")
-        self.assertEqual(route_after_review(state), "end")
+        self.assertEqual(route_after_review(state), "check_escalation")
 
     def test_routes_to_retry_when_rejected_first_time(self):
         state = self._make_state(final_output=None, retry_count=0)
         self.assertEqual(route_after_review(state), "retry_writer")
 
     def test_routes_to_end_when_max_retries_reached(self):
+        # Phase 3+: retries exhausted also routes to check_escalation (the
+        # escalation node is the single exit point toward END/human_review).
         state = self._make_state(final_output=None, retry_count=2)
-        self.assertEqual(route_after_review(state), "end")
+        self.assertEqual(route_after_review(state), "check_escalation")
 
 
 class TestGraphStructure(unittest.TestCase):
@@ -122,15 +126,20 @@ class TestGraphStructure(unittest.TestCase):
         self.assertIsNotNone(compiled_graph)
 
     def test_expected_nodes_present(self):
+        # Node set reflects the current graph: Phase 2B added memory_retrieval,
+        # Phase 3 added check_escalation and human_review.
         from app.graph.graph import compiled_graph
         node_names = set(compiled_graph.nodes.keys())
         expected = {
             "__start__",
             "task_intake",
+            "memory_retrieval",
             "supervisor_planning",
             "specialist_execution",
             "reviewer_validation",
             "writer_retry",
+            "check_escalation",
+            "human_review",
         }
         self.assertEqual(expected, node_names)
 

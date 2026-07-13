@@ -3,5 +3,5 @@
   "graphs": {
     "agentis": "./backend/app/graph/graph.py:graph"
   },
-  "env": "./backend/.env"
+  "env": "./backend/.env.studio"
 }

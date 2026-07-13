@@ -1,178 +1,100 @@
 # Agentis — Multi-Agent Research Orchestration System
 
-A production-ready multi-agent system where a Supervisor decomposes research tasks, specialized agents execute them with tools, and a Reviewer validates the output before delivery.
+![Tests](https://img.shields.io/badge/tests-110%20passing-brightgreen)
+![Python](https://img.shields.io/badge/python-3.11-blue)
+![LangGraph](https://img.shields.io/badge/LangGraph-ready-orange)
+![Docker](https://img.shields.io/badge/docker-compose-blue)
+
+A production-grade multi-agent AI system where a Supervisor Agent decomposes complex research tasks, delegates to specialized agents with real tool use, maintains persistent memory across sessions, escalates to human operators when confidence is low, and provides full observability into every agent decision and cost.
 
 ## Architecture
 
 ```
-POST /tasks
-     │
-     ▼
-task_intake ──► supervisor_planning ──► specialist_execution ──► reviewer_validation
-                                            │                           │
-                                   researcher → analyst → writer    approved?
-                                                                        │
-                                                          yes ──► final_output ──► END
-                                                          no (retry < 2) ──► writer_retry ──► writer
+User Request (Chat UI)
+        ↓
+   FastAPI Backend
+        ↓
+   LangGraph Graph
+        ↓
+┌──────────────────────────────────────────┐
+│  task_intake → memory_retrieval          │
+│       ↓                                  │
+│  supervisor_planning (GPT)               │
+│       ↓                                  │
+│  specialist_execution (parallel)         │
+│  ├── Researcher (Tavily web search)      │
+│  ├── Analyst (code execution)            │
+│  └── Writer (report generation)          │
+│       ↓                                  │
+│  reviewer_validation                     │
+│       ↓                                  │
+│  check_escalation                        │
+│  ├── [approved] → END                    │
+│  └── [escalated] → human_review → END   │
+└──────────────────────────────────────────┘
+        ↓                    ↓
+   Memory System        Observability
+   ├── Redis             ├── Trace Explorer
+   └── ChromaDB          ├── Cost tracking
+                         └── Replay system
 ```
 
-### Agent Hierarchy
+The graph is a LangGraph `StateGraph` compiled with an `AsyncPostgresSaver` checkpointer, which is what makes `human_review` a real pause-and-resume step rather than a blocking wait — the process can restart entirely and still resume a paused task from PostgreSQL.
 
-| Agent | Model | Role |
-|-------|-------|------|
-| Supervisor | gpt-5.4-mini | Decomposes task into ExecutionPlan |
-| Researcher | gpt-5.4-mini | Web search via Tavily, raw findings |
-| Analyst | gpt-5.4-mini | Structures findings, comparative analysis |
-| Writer | gpt-5.4-mini | Polished final report |
-| Reviewer | gpt-5.4-mini | Scores 1-5, approves or sends back with feedback |
+## Key Features
 
-### LLM Provider Swap
+- **Multi-agent orchestration** with LangGraph `StateGraph` — Supervisor, Researcher, Analyst, Writer, and Reviewer roles with a conditional retry edge
+- **Parallel specialist execution** with `asyncio.gather()` — independent subtasks (`depends_on=[]`) run concurrently instead of strictly sequentially
+- **Persistent memory**: Redis (working memory, 24h TTL) + ChromaDB (semantic/vector long-term memory with decay & consolidation)
+- **Human-in-the-Loop**: 3 escalation triggers (sensitive keywords, low reviewer score after retries, explicit agent flag) + an approval queue with approve/edit/reject
+- **Full observability**: per-node execution traces, cost & token accounting per agent, and a task replay system
+- **Provider-agnostic LLM client** — swap OpenAI for Anthropic (or any LangChain chat model) without touching a single agent file
+- **React dashboard** with a performance overview, Trace Explorer, HITL review queue, and a Chat UI for submitting tasks
+- **110 tests** (102 unit + 8 integration), 0 failures
 
-To switch to Claude (or any other provider), edit `backend/app/llm/client.py`:
-1. Add a new `"anthropic"` entry in `MODEL_REGISTRY`
-2. Implement the `elif PROVIDER == "anthropic"` branch in `_build_client()`
-3. Set `LLM_PROVIDER=anthropic` in `.env`
+## Tech Stack
 
-No agent code changes needed.
+| Component | Technology | Purpose |
+|---|---|---|
+| Orchestration | LangGraph | Agent state machine |
+| LLM | OpenAI GPT | All agent reasoning |
+| Embeddings | OpenAI | Semantic memory search |
+| Vector DB | ChromaDB | Long-term memory |
+| Working Memory | Redis | Per-task scratch space |
+| Database | PostgreSQL | Tasks, traces, logs |
+| Web Framework | FastAPI | REST API |
+| Frontend | React + Tailwind | Dashboard + Chat UI |
+| Observability | Custom tracer | Cost + latency tracking |
+| Containers | Docker Compose | Full system orchestration |
+| Testing | pytest | 110 tests |
 
 ## Quick Start
 
-### 1. Configure environment
+1. Clone the repo
+2. Copy `backend/.env.example` to `backend/.env` and fill in:
+   `OPENAI_API_KEY`, `TAVILY_API_KEY`, `LANGCHAIN_API_KEY`
+3. `docker-compose up --build`
+4. Open http://localhost:3000
 
-```bash
-cp backend/.env.example backend/.env
-# Edit backend/.env and fill in:
-# OPENAI_API_KEY=sk-...
-# TAVILY_API_KEY=tvly-...
-# LANGCHAIN_API_KEY=ls__...
-```
+## Screenshots
 
-### 2. Start with Docker Compose
+<!-- Dashboard screenshot -->
+<!-- Chat UI screenshot -->
+<!-- Trace Explorer screenshot -->
+<!-- Reviews queue screenshot -->
 
-```bash
-docker-compose up --build
-```
+## API Overview
 
-The API will be available at `http://localhost:8000`.
-
-### 3. Submit a task
-
-```bash
-curl -s -X POST http://localhost:8000/tasks \
-  -H "Content-Type: application/json" \
-  -d '{"task": "Research the top 3 project management tools for small teams and write a one-paragraph comparison."}' \
-  | python3 -m json.tool
-```
-
-Response:
-```json
-{
-  "task_id": "abc123...",
-  "status": "pending",
-  "message": "Task submitted. Poll GET /tasks/{task_id} for status."
-}
-```
-
-### 4. Poll for results
-
-```bash
-curl -s http://localhost:8000/tasks/<task_id> | python3 -m json.tool
-```
-
-Response when complete:
-```json
-{
-  "task_id": "abc123...",
-  "status": "completed",
-  "original_task": "...",
-  "execution_plan": {...},
-  "final_output": "# Research Report\n...",
-  "langsmith_trace_url": "https://smith.langchain.com/..."
-}
-```
-
-## LangSmith Tracing
-
-Every LLM call and every LangGraph node execution is traced automatically.
-
-**To view traces:**
-1. Log in to [smith.langchain.com](https://smith.langchain.com)
-2. Select the **agentis** project from the left sidebar
-3. Each submitted task creates one root run named `agentis-task-<task_id>`
-4. Click any run to see the full execution tree: supervisor → researcher → analyst → writer → reviewer
-
-The `langsmith_trace_url` field in `GET /tasks/{task_id}` response links directly to the specific run.
-
-**Configuration:**
-```
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_API_KEY=ls__...
-LANGCHAIN_PROJECT=agentis
-```
-
-## LangGraph Studio (visual debugger)
-
-Studio lets you step through the graph node-by-node, inspect state at every
-step, replay runs, and edit inputs — all without touching the FastAPI layer.
-
-### 1. Install the CLI (once, dev machine only)
-
-```bash
-pip install -r backend/dev-requirements.txt
-# installs langgraph-cli[inmem] — NOT added to the production image
-```
-
-### 2. Run the local Studio server
-
-```bash
-cd backend
-langgraph dev
-```
-
-The CLI starts a local API server on `http://127.0.0.1:2024` and prints:
-
-```
-Ready!
-- API: http://127.0.0.1:2024
-- Docs: http://127.0.0.1:2024/docs
-- LangGraph Studio: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
-```
-
-Open the printed Studio URL in **Chrome or Firefox** (Safari blocks localhost
-connections — use `langgraph dev --tunnel` if you must use Safari).
-
-### 3. What you can do in Studio
-
-- **Visualise** the full graph topology (nodes, edges, conditional retry edge)
-- **Submit a run** directly from the UI and watch state update at each node
-- **Inspect state** after every node — see `execution_plan`, `subtask_results`,
-  `review_feedback`, `retry_count`, `final_output` as they are written
-- **Replay** a previous run from any checkpoint
-- **Edit state** mid-run to test what happens when the Reviewer rejects
-
-### Important tradeoffs — Studio vs the FastAPI app
-
-| Aspect | `langgraph dev` (Studio) | `docker-compose up` (production) |
-|--------|--------------------------|----------------------------------|
-| Postgres / DB logging | **No** — Studio uses its own in-memory runtime; `Task`, `SubtaskLog`, `ToolCallLog` tables are **not written** | Yes — full DB persistence |
-| FastAPI layer | **Bypassed** — Studio talks directly to the LangGraph API server, not to `POST /tasks` | In use |
-| State persistence | In-memory, pickled to `.langgraph_api/` — **lost on server restart** | Postgres (when checkpointer added in Phase 2) |
-| LangSmith tracing | Yes — same `LANGCHAIN_API_KEY` / `LANGCHAIN_PROJECT` env vars apply | Yes |
-| Hot reload | Yes — saves on restart per code change | No (volume mount auto-reloads uvicorn) |
-| Needs Postgres running | **No** | Yes |
-
-**Bottom line:** Studio is the right tool for iterating on agent prompts, graph
-topology, and control flow. Switch back to `docker-compose up` when you need to
-verify the full end-to-end path including DB writes and the REST API.
-
-## Local Development (without Docker)
-
-```bash
-# Start Postgres separately, then:
-cd backend
-pip install -r requirements.txt
-PYTHONPATH=. uvicorn app.main:app --reload
-```
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/tasks` | Submit a research task |
+| GET | `/tasks/{id}` | Get task status and result |
+| GET | `/tasks/{id}/trace` | Full execution trace with costs |
+| POST | `/tasks/{id}/replay` | Replay a past task |
+| GET | `/reviews/pending` | Human review queue |
+| POST | `/reviews/{id}/decision` | Approve/edit/reject |
+| GET | `/stats/performance` | Aggregated metrics |
+| GET | `/api/memory/dashboard/{user_id}` | Memory stats |
 
 ## Project Structure
 
@@ -180,60 +102,67 @@ PYTHONPATH=. uvicorn app.main:app --reload
 agentis/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                     # FastAPI app factory
+│   │   ├── main.py                       # FastAPI app factory + startup lifecycle
+│   │   ├── checkpointer.py               # AsyncPostgresSaver — enables graph pause/resume
 │   │   ├── llm/
-│   │   │   └── client.py               # Unified LLM client (provider-agnostic)
+│   │   │   └── client.py                 # Provider-agnostic LLM client (call_llm)
 │   │   ├── agents/
-│   │   │   ├── supervisor.py           # Task decomposition → ExecutionPlan
-│   │   │   ├── reviewer.py             # Quality scoring + feedback loop
+│   │   │   ├── supervisor.py             # Task decomposition → ExecutionPlan
+│   │   │   ├── reviewer.py               # Quality scoring + retry feedback loop
 │   │   │   └── specialists/
-│   │   │       ├── researcher.py       # Web search + synthesis
-│   │   │       ├── analyst.py          # Structured analysis
-│   │   │       └── writer.py           # Final report generation
+│   │   │       ├── researcher.py         # Web search + synthesis
+│   │   │       ├── analyst.py            # Structured analysis (+ code execution)
+│   │   │       └── writer.py             # Final report generation
 │   │   ├── graph/
-│   │   │   ├── state.py                # AgentState TypedDict + Pydantic models
-│   │   │   └── graph.py                # LangGraph StateGraph
+│   │   │   ├── state.py                  # AgentState TypedDict + Pydantic models
+│   │   │   └── graph.py                  # LangGraph StateGraph + parallel scheduler
+│   │   ├── memory/
+│   │   │   ├── working_memory.py         # Redis per-task scratchpad
+│   │   │   ├── semantic_memory.py        # ChromaDB long-term memory
+│   │   │   ├── retrieval.py              # Memory context injection for planning
+│   │   │   └── management.py             # Decay, consolidation, dashboard stats
+│   │   ├── observability/
+│   │   │   └── tracing.py                # traced_node wrapper — cost/latency/metadata
 │   │   ├── tools/
-│   │   │   ├── registry.py             # Tool registry with DB logging
-│   │   │   ├── web_search.py           # Tavily web search
-│   │   │   └── code_execution.py       # Sandboxed Python subprocess
+│   │   │   ├── registry.py               # Tool registry with per-agent allowlists
+│   │   │   ├── web_search.py             # Tavily web search
+│   │   │   └── code_execution.py         # Sandboxed Python subprocess
 │   │   ├── db/
-│   │   │   ├── engine.py               # SQLAlchemy async engine
-│   │   │   ├── models.py               # Task, SubtaskLog, ToolCallLog
-│   │   │   └── queries.py              # Async query helpers
+│   │   │   ├── models.py                 # Task, SubtaskLog, ExecutionTrace, HumanReview
+│   │   │   └── queries.py                # Async query helpers
 │   │   └── routers/
-│   │       └── tasks.py                # POST /tasks, GET /tasks/{id}
+│   │       ├── tasks.py                  # POST /tasks, GET /tasks/{id}
+│   │       ├── traces.py                 # GET /tasks/{id}/trace, replay
+│   │       ├── reviews.py                # HITL approval queue
+│   │       ├── stats.py                  # Dashboard aggregates
+│   │       └── memory.py                 # Memory dashboard + search API
+│   ├── tests/                            # 102 unit tests + test_e2e.py (8 integration)
 │   ├── requirements.txt
-│   ├── Dockerfile
-│   └── .env.example
+│   └── Dockerfile
+├── frontend/
+│   └── src/
+│       ├── pages/
+│       │   ├── Chat.jsx                  # Task submission + live progress + markdown result
+│       │   ├── Dashboard.jsx             # Cost/latency charts, task status breakdown
+│       │   ├── Reviews.jsx               # HITL approval queue UI
+│       │   └── TraceExplorer.jsx         # Per-node execution trace viewer
+│       └── api.js                        # Central REST client
 └── docker-compose.yml
 ```
 
-## API Reference
+## Engineering Decisions
 
-### `POST /tasks`
-Submit a research task.
+- **Why LangGraph over a simple chain** — a state machine with conditional edges gives explicit retry logic (`route_after_review`) and pause/resume semantics for human-in-the-loop, instead of burying control flow inside nested if/else blocks.
+- **Why ChromaDB for long-term memory** — semantic search finds conceptually similar past tasks by meaning ("AI market" ≈ "artificial intelligence industry"), not exact key lookup, so the Supervisor can reuse effective approaches even when phrased differently.
+- **Why `asyncio.gather()` for parallel execution** — it's non-blocking and shares the same event loop as FastAPI, so independent subtasks overlap in wall time with zero thread-pool or process overhead.
+- **Why the `traced_node` wrapper pattern** — every node is instrumented transparently via a decorator; observability (cost, latency, token counts) is fully decoupled from agent logic and a trace-write failure can never crash a production node.
+- **Why `AsyncPostgresSaver` for checkpointing** — LangGraph needs to persist state somewhere durable to pause a graph mid-execution at `human_review` and resume it later (possibly after a process restart) once a human submits a decision.
+- **Why a provider-agnostic LLM client** — `call_llm()` is the only LLM entry point in the codebase; swapping OpenAI for Claude is a one-line `MODEL_REGISTRY` change plus a new branch in `_build_client()`, with zero changes to any agent file.
+- **Why Redis for working memory** — sub-millisecond per-task scratch reads/writes, with a native 24-hour TTL so abandoned or crashed task data expires automatically instead of requiring manual cleanup.
 
-**Body:** `{"task": "your research question"}`
+## Running Tests
 
-**Returns:** `{"task_id": "...", "status": "pending", "message": "..."}`
-
-### `GET /tasks/{task_id}`
-Get task status and results.
-
-**Returns:**
-- `status`: `pending | running | completed | failed`
-- `execution_plan`: Supervisor's decomposition plan
-- `final_output`: Final written report (when completed)
-- `langsmith_trace_url`: Direct link to the LangSmith trace
-
-### `GET /health`
-Health check. Returns `{"status": "ok"}`.
-
-## Database Models
-
-| Table | Purpose |
-|-------|---------|
-| `tasks` | One row per task: status, plan, output, trace ID |
-| `subtask_logs` | One row per specialist execution |
-| `tool_call_logs` | Every tool invocation with latency and I/O |
+```bash
+pytest tests/ --ignore=tests/test_e2e.py   # 102 unit tests
+docker compose run --rm test               # 8 integration tests
+```

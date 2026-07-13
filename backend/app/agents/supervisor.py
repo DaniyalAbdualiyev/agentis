@@ -85,6 +85,9 @@ Rules:
 - depends_on for subtask_2 = ["subtask_1"], for subtask_3 = ["subtask_2"]
 - Descriptions must be specific and actionable
 - The reasoning field should briefly explain your decomposition strategy
+- When subtasks are truly independent and don't need each other's output, set
+  depends_on=[] to enable parallel execution. Only add a dependency when a
+  subtask genuinely needs another subtask's output to proceed.
 
 Memory Instructions:
 - If "## Past Context (from memory)" is present in the user message, you MUST

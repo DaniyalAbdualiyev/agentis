@@ -238,13 +238,14 @@ class TestQuery(unittest.IsolatedAsyncioTestCase):
     async def test_query_filters_low_similarity(
         self, mock_http_client: MagicMock, _mock_openai: MagicMock
     ) -> None:
-        """Results below the relevance threshold (0.7) should be excluded."""
-        # distance=0.4 → similarity=0.6, below threshold of 0.7.
+        """Results below the configured relevance threshold should be excluded."""
+        # The configured threshold is memory_relevance_threshold = 0.5.
+        # distance=0.7 → similarity=0.3, comfortably below 0.5 → filtered out.
         query_result = _make_query_result(
             ids=["doc-low"],
             documents=["Weak match"],
             metadatas=[{"user_id": "default", "access_count": 0}],
-            distances=[0.4],
+            distances=[0.7],
         )
         task_col = _make_mock_collection(count=1, query_result=query_result)
         empty_col = _make_mock_collection(count=0)

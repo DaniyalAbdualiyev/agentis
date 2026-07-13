@@ -46,7 +46,25 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Create all tables (idempotent)."""
+    """Create all tables (idempotent).
+
+    create_all only CREATES missing tables — it never ALTERs an existing one.
+    Phase 4 added four aggregate columns to the pre-existing `tasks` table, so
+    we additively backfill them with `ADD COLUMN IF NOT EXISTS` (a Postgres
+    feature).  This keeps the dev workflow migration-free while remaining safe
+    to run repeatedly.  For production, a proper Alembic migration would replace
+    this block.
+    """
+    from sqlalchemy import text
+
     from app.db import models  # noqa: F401 — import to register models
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Phase 4: additive columns on the existing tasks table.
+        for ddl in (
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS total_cost_usd DOUBLE PRECISION DEFAULT 0.0",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS total_latency_ms INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS total_input_tokens INTEGER DEFAULT 0",
+            "ALTER TABLE tasks ADD COLUMN IF NOT EXISTS total_output_tokens INTEGER DEFAULT 0",
+        ):
+            await conn.execute(text(ddl))

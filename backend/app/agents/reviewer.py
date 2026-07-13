@@ -185,6 +185,10 @@ async def run_reviewer(state: AgentState) -> dict:
 
         updates: dict = {}
 
+        # Always persist the latest score so check_escalation_node can detect
+        # trigger 2 (score < 3 after retries exhausted) without re-calling the LLM.
+        updates["review_score"] = review.score
+
         if review.approved or retry_count >= 2:
             # Acceptance path — set final_output so the router goes to END.
             # `forced=True` in the log means we accepted despite low score
