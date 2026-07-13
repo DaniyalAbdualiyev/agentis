@@ -78,10 +78,10 @@ The graph is a LangGraph `StateGraph` compiled with an `AsyncPostgresSaver` chec
 
 ## Screenshots
 
-<!-- Dashboard screenshot -->
-<!-- Chat UI screenshot -->
-<!-- Trace Explorer screenshot -->
-<!-- Reviews queue screenshot -->
+![Dashboard](docs/screenshots/dashboard.png)
+![Chat UI](docs/screenshots/chat.png)
+![Trace Explorer](docs/screenshots/trace-explorer.png)
+![Reviews](docs/screenshots/reviews.png)
 
 ## API Overview
 
